@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""vnc_launcher - VNC URI launcher
+   vnc_launcher launches a designated vnc-client using a vnc:// URI, by
+   transforming the URI into arguments understood by clients compatible
+   with standard clients likes xvnciewer.
+
+   vnc_launcher will store any URI password, in vncpasswd compatible temporary
+   file which is removed after the client exits.
+
+   vnc_launcher will consider the username to be the VNC password, when it is
+   present, but a password is not. This allows for vnc_launcher to be called
+   via a .desktop file from programs like xdg-open.
+
+   requires: PyCrypto, pip install pycrypto
+   """
+__author__ = 'Stephen Kacsmark'
+__copyright__ = 'Copyright 2018 Stephen Kacsmark'
+__credits__ = ['James Cuzella']
+__license__ = 'MIT'
+__version__ = '0.0.1'
+__maintainer__ = 'Stephen Kacsmark'
+
+import sys
+from collections import namedtuple
+from Crypto.Cipher import DES
+import struct
+import tempfile
+import os
+import subprocess
+if sys.version_info.major == 2:
+    from urlparse import urlparse
+else:
+    from urllib.parse import urlparse
+
+VncConfig = namedtuple('VncConfig', 'connection username password')
+
+
+class VncLauncher(object):
+    def __init__(self, uri, viewer='vncviewer'):
+        self._uri = uri
+        self._viewer = viewer
+        self._config = self.parse_uri(uri)
+
+    def launch(self):
+        self.vnc_launch(self._config)
+
+    def vnc_launch(self, vnc_config):
+        vnc_command, cleanup = self.vnc_command_line(vnc_config)
+        subprocess.call(vnc_command)
+        if cleanup:
+            subprocess.call(cleanup)
+
+    def parse_uri(self, url):
+        parts = urlparse(url)
+        vnc_port = ':{}'.format(parts.port) if parts.port else ''
+        vnc_url = parts.hostname + vnc_port
+        if parts.scheme != 'vnc':
+            msg = '{} is not a supported url scheme'.format(parts.scheme)
+            raise Exception(msg)
+        password = parts.password
+        if parts.username and not parts.password:
+            password = parts.username
+        return VncConfig(vnc_url, parts.username, password)
+
+    def vnc_passwd_encode(self, passwd):
+        passwd = (passwd + '\00'*8)[:8]
+        vnckey = b'\xe8J\xd6`\xc4r\x1a\xe0'
+        cipher = DES.new(vnckey)
+        return cipher.encrypt(passwd)
+
+    def write_vnc_passwd_file(self, passwd):
+        fd, name = tempfile.mkstemp(prefix='vnc_launcher')
+        os.write(fd, passwd)
+        os.close(fd)
+        return name
+
+    def vnc_command_line(self, vnc_config):
+        vnc_command = [vnc_app()]
+        cleanup = []
+        if vnc_config.password:
+            encpasswd = self.vnc_passwd_encode(vnc_config.password)
+            tmp_name = self.write_vnc_passwd_file(encpasswd)
+            vnc_command += ['-passwd', tmp_name]
+            cleanup = ['rm', tmp_name]
+        vnc_command.append(vnc_config.connection)
+        return vnc_command, cleanup
+
+
+def vnc_app():
+    vnc_app = os.environ.get('VNCVIEWER')
+    return vnc_app if vnc_app else 'vncviewer'
+
+
+if __name__ == '__main__':
+    def main(argv):
+        if len(argv) != 2:
+            print('Usage: {} uri'.format(argv[0]))
+            return 1
+
+        vnc = VncLauncher(argv[1], vnc_app())
+        vnc.launch()
+        return 1
+
+    sys.exit(main(sys.argv))
